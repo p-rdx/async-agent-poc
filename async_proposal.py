@@ -6,7 +6,7 @@ from pprint import pprint
 
 from pipeline import Pipeline, Node
 from caller import QueueListenerBatchifyer
-from connector import AioQueueConnector, CmdConnector
+from connector import AioQueueConnector, CmdConnector, SingleRequestConnector
 
 
 class State:
@@ -55,7 +55,7 @@ class AsyncAgent:
         await self.process(state.user_id)
 
     async def process(self, user_id, node=None, service_response=None):
-        if node:
+        if node:       # if node and node.state_updater - это будет костыль, чтобы результат можно было положить в стэйт as is сейчас
             state = await self.statestorage.update_service_responses(user_id, node.name, service_response, node.state_named_group)
         else:
             state = await self.statestorage.get_or_create(user_id)
@@ -68,14 +68,18 @@ class AsyncAgent:
                 continue
             done_services.update({key for key, value in services.items() if value is not None})
             waiting_services.update({key for key, value in services.items() if value is None})
+        print(done_services, waiting_services)
         next_services = self.pipeline.get_next_nodes(done=done_services, waiting=waiting_services)
         ns = [i for i in next_services.keys()]
-        if ns:                                                                      # remove
-            print(f'start processing {user_id}, sending to {ns}')                   # remove
-        for service, node in next_services.items():
-            await self.statestorage.update_service_responses(user_id, service, None, node.state_named_group)
-            await node.connector.process(state)
+        if ns:
+            print(ns)
+        for service, next_node in next_services.items():
+            await self.statestorage.update_service_responses(user_id, service, None, next_node.state_named_group)  # чтобы понимать, на какие сервисы отправили
+        for service, next_node in next_services.items():
+            result = await next_node.connector.process(state)
             print(f'{user_id} send to {service}')
+            if result is not None:  # на случай, если сервис без разрыва. Например хтмль запрос без батчификации
+                await self.process(user_id, next_node, result)
 
 
 async def produce(agent, count):
@@ -83,13 +87,12 @@ async def produce(agent, count):
         user_id = f'user No {i}'
         message = f'message for {i}'
         print(f'producing {i}')
-        await asyncio.sleep(random.random())
         await agent.register_msg(user_id, message)
 
 
 async def run(count):
     testconfig = {
-        'anno1': {'connector': AioQueueConnector(asyncio.Queue()), 'previous_nodes': set(), 'batch_size': 2, 'state_named_group': 'annotators'},
+        'anno1': {'connector': SingleRequestConnector(), 'previous_nodes': set(), 'state_named_group': 'annotators'},
         'anno2': {'connector': AioQueueConnector(asyncio.Queue()), 'previous_nodes': set(), 'batch_size': 3, 'state_named_group': 'annotators'},
         'anno3': {'connector': AioQueueConnector(asyncio.Queue()), 'previous_nodes': set(), 'batch_size': 2, 'state_named_group': 'annotators'},
         'serv2.1': {
@@ -130,7 +133,7 @@ async def run(count):
     consumers = []
 
     for node in pipeline.nodes.values():
-        if node.name == 'finally':
+        if not isinstance(node.connector, AioQueueConnector):
             continue
         caller = QueueListenerBatchifyer(node, agent.process)
         consumers.append(await caller.register_consumer())
@@ -140,11 +143,5 @@ async def run(count):
 
 loop = asyncio.get_event_loop()
 loop.set_debug(True)
-try:
-    loop.run_until_complete(run(5))
-finally:
-    loop.stop()
-    pending = asyncio.Task.all_tasks()
-    loop.run_until_complete(asyncio.gather(*pending))
 
-loop.close()
+loop.run_until_complete(run(5))
