@@ -53,24 +53,23 @@ class AsyncAgent:
     async def register_msg(self, user_id, msg):
         state = await self.statestorage.get_or_create(user_id)
         await self.statestorage.add_utterance(state.user_id, msg)
-        self.cache[user_id] = {'done': set(), 'waiting': set()}
+        self.cache[user_id] = {'done': set(), 'waiting': set()}  # новое сообщение - зарегистрировали в кэше, который отслеживает прохождение по пайплайну (и другие вещи)
         await self.process(state.user_id)
 
 
     async def process(self, user_id, node=None, service_response=None):
         if node:       # if node and node.state_updater - это будет костыль, чтобы результат можно было положить в стэйт as is сейчас
             state = await self.statestorage.update_service_responses(user_id, node.name, service_response, node.state_named_group)
-            self.cache[user_id]['waiting'].discard(node.name)
+            self.cache[user_id]['waiting'].discard(node.name)  # убираем сервис из waiting и добавляем его в done
             self.cache[user_id]['done'].add(node.name)
         else:
             state = await self.statestorage.get_or_create(user_id)
 
         next_services = self.pipeline.get_next_nodes(**self.cache[user_id])
-        ns = [i for i in next_services.keys()]
+        ns = {i for i in next_services.keys()}
         if ns:
             print(ns)
-        for service, next_node in next_services.items():
-            await self.statestorage.update_service_responses(user_id, service, None, next_node.state_named_group)  # чтобы понимать, на какие сервисы отправили
+        self.cache[user_id]['waiting'].update(ns)  # Докидываем все последующие сервисы в waiting перед отправкой
         for service, next_node in next_services.items():
             result = await next_node.connector.process(state)
             print(f'{user_id} send to {service}')
