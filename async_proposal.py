@@ -45,31 +45,27 @@ class StateStorage:  # чё то типа монги
 
 
 class AsyncAgent:
-    def __init__(self, pipeline, statestorage):
+    def __init__(self, pipeline, statestorage, cache):
         self.statestorage = statestorage
         self.pipeline = pipeline
+        self.cache = cache
 
     async def register_msg(self, user_id, msg):
         state = await self.statestorage.get_or_create(user_id)
         await self.statestorage.add_utterance(state.user_id, msg)
+        self.cache[user_id] = {'done': set(), 'waiting': set()}
         await self.process(state.user_id)
+
 
     async def process(self, user_id, node=None, service_response=None):
         if node:       # if node and node.state_updater - это будет костыль, чтобы результат можно было положить в стэйт as is сейчас
             state = await self.statestorage.update_service_responses(user_id, node.name, service_response, node.state_named_group)
+            self.cache[user_id]['waiting'].discard(node.name)
+            self.cache[user_id]['done'].add(node.name)
         else:
             state = await self.statestorage.get_or_create(user_id)
-        service_response_groups = self.pipeline.get_state_named_groups()
-        done_services = set()
-        waiting_services = set()
-        for group_name in service_response_groups:
-            services = state.services.get(group_name, None)
-            if not services:
-                continue
-            done_services.update({key for key, value in services.items() if value is not None})
-            waiting_services.update({key for key, value in services.items() if value is None})
-        print(done_services, waiting_services)
-        next_services = self.pipeline.get_next_nodes(done=done_services, waiting=waiting_services)
+
+        next_services = self.pipeline.get_next_nodes(**self.cache[user_id])
         ns = [i for i in next_services.keys()]
         if ns:
             print(ns)
@@ -129,7 +125,7 @@ async def run(count):
 
     state_storage = StateStorage()
 
-    agent = AsyncAgent(pipeline, state_storage)
+    agent = AsyncAgent(pipeline, state_storage, dict())
     consumers = []
 
     for node in pipeline.nodes.values():
